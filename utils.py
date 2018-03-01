@@ -18,6 +18,7 @@ import skimage.color
 import skimage.io
 import urllib.request
 import shutil
+import cv2
 
 # URL from which to download the latest COCO trained weights
 COCO_MODEL_URL = "https://github.com/matterport/Mask_RCNN/releases/download/v2.0/mask_rcnn_coco.h5"
@@ -396,9 +397,12 @@ def resize_image(image, min_dim=None, max_dim=None, padding=False):
         if round(image_max * scale) > max_dim:
             scale = max_dim / image_max
     # Resize image and mask
+    print('scale .........', scale)
     if scale != 1:
-        image = scipy.misc.imresize(
-            image, (round(h * scale), round(w * scale)))
+        # image = scipy.misc.imresize(
+        #     image, (round(h * scale), round(w * scale)))
+        print("resize ....................", (round(w * scale), round(h * scale)))
+        image = cv2.resize(image, (round(w * scale), round(h * scale)))
     # Need padding?
     if padding:
         # Get new height and width
@@ -408,6 +412,7 @@ def resize_image(image, min_dim=None, max_dim=None, padding=False):
         left_pad = (max_dim - w) // 2
         right_pad = max_dim - w - left_pad
         padding = [(top_pad, bottom_pad), (left_pad, right_pad), (0, 0)]
+        print("padding ...........", padding)
         image = np.pad(image, padding, mode='constant', constant_values=0)
         window = (top_pad, left_pad, h + top_pad, w + left_pad)
     return image, window, scale, padding
@@ -506,24 +511,39 @@ def generate_anchors(scales, ratios, shape, feature_stride, anchor_stride):
     scales, ratios = np.meshgrid(np.array(scales), np.array(ratios))
     scales = scales.flatten()
     ratios = ratios.flatten()
+    print(scales)
+    print(ratios)
 
     # Enumerate heights and widths from scales and ratios
     heights = scales / np.sqrt(ratios)
     widths = scales * np.sqrt(ratios)
 
+    print('heights', heights)
+    print('widths', widths)
+
     # Enumerate shifts in feature space
     shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride
     shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride
+
     shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y)
+
+    # print('shifts_x', shifts_x)
+    # print('shifts_y', shifts_y)
 
     # Enumerate combinations of shifts, widths, and heights
     box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
+    # print('box_widths', box_widths)
+    # print('box_centers_x', box_centers_x)
     box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
 
     # Reshape to get a list of (y, x) and a list of (h, w)
     box_centers = np.stack(
-        [box_centers_y, box_centers_x], axis=2).reshape([-1, 2])
+        [box_centers_y, box_centers_x], axis=2)
+    print('box_centers', box_centers)
+    box_centers = box_centers.reshape([-1, 2])
+    print('box_centers_reshape', box_centers)
     box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2])
+    print('box_sizes', box_sizes)
 
     # Convert to corner coordinates (y1, x1, y2, x2)
     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
@@ -546,6 +566,11 @@ def generate_pyramid_anchors(scales, ratios, feature_shapes, feature_strides,
     # [anchor_count, (y1, x1, y2, x2)]
     anchors = []
     for i in range(len(scales)):
+        print('scales[i]', scales[i])
+        print('ratios', ratios)
+        print('feature_shapes[i]', feature_shapes[i])
+        print('feature_strides[i]', feature_strides[i])
+        print('anchor_stride', anchor_stride)
         anchors.append(generate_anchors(scales[i], ratios, feature_shapes[i],
                                         feature_strides[i], anchor_stride))
     return np.concatenate(anchors, axis=0)

@@ -666,6 +666,16 @@ def clip_to_window(window, boxes):
     return boxes
 
 
+def save_arr(arr, name):
+    folder = "/home/jxy/data/maskrcnn/weights/"
+    out = folder + name + '-' + '_'.join(str(x) for x in arr.shape) + '.txt'
+    file = open(out, "w")
+    fa = arr.flatten()
+    for i in fa:
+        file.write(str(i) + "\n")
+    file.close()
+
+
 def refine_detections(rois, probs, deltas, window, config):
     """Refine classified proposals and filter overlaps and return final
     detections.
@@ -680,16 +690,29 @@ def refine_detections(rois, probs, deltas, window, config):
 
     Returns detections shaped: [N, (y1, x1, y2, x2, class_id, score)]
     """
+    print("probs", probs.shape, probs)
+    # save_arr(rois, "rois")
+    # save_arr(probs, "probs")
+    # save_arr(deltas, "deltas")
+    # save_arr(window, "window")
     # Class IDs per ROI
     class_ids = np.argmax(probs, axis=1)
+    # print("class_ids", class_ids.shape, class_ids)
+    save_arr(class_ids, "class_ids")
     # Class probability of the top class of each ROI
     class_scores = probs[np.arange(class_ids.shape[0]), class_ids]
+    # print("class_scores", class_scores.shape, class_scores)
+    # save_arr(class_scores, "class_scores")
     # Class-specific bounding box deltas
     deltas_specific = deltas[np.arange(deltas.shape[0]), class_ids]
+    # print("deltas_specific", deltas_specific.shape, deltas_specific)
+    # save_arr(deltas_specific, "deltas_specific")
     # Apply bounding box deltas
     # Shape: [boxes, (y1, x1, y2, x2)] in normalized coordinates
     refined_rois = utils.apply_box_deltas(
         rois, deltas_specific * config.BBOX_STD_DEV)
+    # print("refined_rois", refined_rois)
+    # save_arr(refined_rois, "refined_rois")
     # Convert coordiates to image domain
     # TODO: better to keep them normalized until later
     height, width = config.IMAGE_SHAPE[:2]
@@ -698,6 +721,7 @@ def refine_detections(rois, probs, deltas, window, config):
     refined_rois = clip_to_window(window, refined_rois)
     # Round and cast to int since we're deadling with pixels now
     refined_rois = np.rint(refined_rois).astype(np.int32)
+    # print("refined_rois", refined_rois)
 
     # TODO: Filter out boxes with zero area
 
@@ -708,27 +732,41 @@ def refine_detections(rois, probs, deltas, window, config):
         keep = np.intersect1d(
             keep, np.where(class_scores >= config.DETECTION_MIN_CONFIDENCE)[0])
 
+    print("keep ...........", keep)
     # Apply per-class NMS
     pre_nms_class_ids = class_ids[keep]
     pre_nms_scores = class_scores[keep]
     pre_nms_rois = refined_rois[keep]
+    print('pre_nms_class_ids', pre_nms_class_ids)
+    print('pre_nms_scores', pre_nms_scores)
+    print('pre_nms_rois', pre_nms_rois)
     nms_keep = []
     for class_id in np.unique(pre_nms_class_ids):
         # Pick detections of this class
         ixs = np.where(pre_nms_class_ids == class_id)[0]
+        print('ixs', ixs)
+        print('pre_nms_rois[ixs]', pre_nms_rois[ixs])
+        print('pre_nms_scores[ixs]', pre_nms_scores[ixs])
         # Apply NMS
         class_keep = utils.non_max_suppression(
             pre_nms_rois[ixs], pre_nms_scores[ixs],
             config.DETECTION_NMS_THRESHOLD)
+        print("class_keep", class_keep)
         # Map indicies
         class_keep = keep[ixs[class_keep]]
+        print("class_keep2", class_keep)
         nms_keep = np.union1d(nms_keep, class_keep)
+        print("nms_keep", nms_keep)
     keep = np.intersect1d(keep, nms_keep).astype(np.int32)
+    print('==================keep', keep)
 
     # Keep top detections
     roi_count = config.DETECTION_MAX_INSTANCES
+    print('DETECTION_MAX_INSTANCES', roi_count)
     top_ids = np.argsort(class_scores[keep])[::-1][:roi_count]
+    print('top_ids', top_ids)
     keep = keep[top_ids]
+    print('keep', keep)
 
     # Arrange output as [N, (y1, x1, y2, x2, class_id, score)]
     # Coordinates are in image domain.
@@ -754,6 +792,7 @@ class DetectionLayer(KE.Layer):
         def wrapper(rois, mrcnn_class, mrcnn_bbox, image_meta):
             detections_batch = []
             _, _, window, _ = parse_image_meta(image_meta)
+            print(window)
             for b in range(self.config.BATCH_SIZE):
                 detections = refine_detections(
                     rois[b], mrcnn_class[b], mrcnn_bbox[b], window[b], self.config)
@@ -875,13 +914,13 @@ def fpn_classifier_graph(rois, feature_maps,
     x = PyramidROIAlign([pool_size, pool_size], image_shape,
                         name="roi_align_classifier")([rois] + feature_maps)
     # Two 1024 FC layers (implemented with Conv2D for consistency)
-    x = KL.TimeDistributed(KL.Conv2D(1024, (pool_size, pool_size), padding="valid"),
+    mrcnn_class_conv1 = x = KL.TimeDistributed(KL.Conv2D(1024, (pool_size, pool_size), padding="valid"),
                            name="mrcnn_class_conv1")(x)
     x = KL.TimeDistributed(BatchNorm(axis=3), name='mrcnn_class_bn1')(x)
     x = KL.Activation('relu')(x)
     x = KL.TimeDistributed(KL.Conv2D(1024, (1, 1)),
                            name="mrcnn_class_conv2")(x)
-    x = KL.TimeDistributed(BatchNorm(axis=3),
+    mrcnn_class_bn2 = x = KL.TimeDistributed(BatchNorm(axis=3),
                            name='mrcnn_class_bn2')(x)
     x = KL.Activation('relu')(x)
 
@@ -902,7 +941,7 @@ def fpn_classifier_graph(rois, feature_maps,
     s = K.int_shape(x)
     mrcnn_bbox = KL.Reshape((s[1], num_classes, 4), name="mrcnn_bbox")(x)
 
-    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox
+    return mrcnn_class_logits, mrcnn_probs, mrcnn_bbox, mrcnn_class_bn2
 
 
 def build_fpn_mask_graph(rois, feature_maps,
@@ -927,6 +966,55 @@ def build_fpn_mask_graph(rois, feature_maps,
     # Conv layers
     x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
                            name="mrcnn_mask_conv1")(x)
+    x = KL.TimeDistributed(BatchNorm(axis=3),
+                           name='mrcnn_mask_bn1')(x)
+    x = KL.Activation('relu')(x)
+
+    x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv2")(x)
+    x = KL.TimeDistributed(BatchNorm(axis=3),
+                           name='mrcnn_mask_bn2')(x)
+    x = KL.Activation('relu')(x)
+
+    x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv3")(x)
+    x = KL.TimeDistributed(BatchNorm(axis=3),
+                           name='mrcnn_mask_bn3')(x)
+    x = KL.Activation('relu')(x)
+
+    x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv4")(x)
+    x = KL.TimeDistributed(BatchNorm(axis=3),
+                           name='mrcnn_mask_bn4')(x)
+    x = KL.Activation('relu')(x)
+
+    x = KL.TimeDistributed(KL.Conv2DTranspose(256, (2, 2), strides=2, activation="relu"),
+                           name="mrcnn_mask_deconv")(x)
+    x = KL.TimeDistributed(KL.Conv2D(num_classes, (1, 1), strides=1, activation="sigmoid"),
+                           name="mrcnn_mask")(x)
+    return x
+
+def build_fpn_mask_graph2(detection, num_classes):
+    """Builds the computation graph of the mask head of Feature Pyramid Network.
+
+    rois: [batch, num_rois, (y1, x1, y2, x2)] Proposal boxes in normalized
+          coordinates.
+    feature_maps: List of feature maps from diffent layers of the pyramid,
+                  [P2, P3, P4, P5]. Each has a different resolution.
+    image_shape: [height, width, depth]
+    pool_size: The width of the square feature map generated from ROI Pooling.
+    num_classes: number of classes, which determines the depth of the results
+
+    Returns: Masks [batch, roi_count, height, width, num_classes]
+    """
+    # ROI Pooling
+    # Shape: [batch, boxes, pool_height, pool_width, channels]
+    # x = PyramidROIAlign([pool_size, pool_size], image_shape,
+    #                     name="roi_align_mask")([rois] + feature_maps)
+
+    # Conv layers
+    x = KL.TimeDistributed(KL.Conv2D(256, (3, 3), padding="same"),
+                           name="mrcnn_mask_conv1")(detection)
     x = KL.TimeDistributed(BatchNorm(axis=3),
                            name='mrcnn_mask_bn1')(x)
     x = KL.Activation('relu')(x)
@@ -1589,6 +1677,7 @@ def data_generator(dataset, config, shuffle=True, augment=True, random_rois=0,
                                              config.BACKBONE_STRIDES,
                                              config.RPN_ANCHOR_STRIDE)
 
+
     # Keras requires a generator to run indefinately.
     while True:
         try:
@@ -1821,6 +1910,8 @@ class MaskRCNN():
                                                       config.BACKBONE_STRIDES,
                                                       config.RPN_ANCHOR_STRIDE)
 
+
+
         # RPN Model
         rpn = build_rpn_model(config.RPN_ANCHOR_STRIDE,
                               len(config.RPN_ANCHOR_RATIOS), 256)
@@ -1833,7 +1924,8 @@ class MaskRCNN():
         # of outputs across levels.
         # e.g. [[a1, b1, c1], [a2, b2, c2]] => [[a1, a2], [b1, b2], [c1, c2]]
         output_names = ["rpn_class_logits", "rpn_class", "rpn_bbox"]
-        outputs = list(zip(*layer_outputs))
+        print("length................", len(layer_outputs))
+        outputs_list = outputs = list(zip(*layer_outputs))
         outputs = [KL.Concatenate(axis=1, name=n)(list(o))
                    for o, n in zip(outputs, output_names)]
 
@@ -1913,7 +2005,7 @@ class MaskRCNN():
         else:
             # Network Heads
             # Proposal classifier and BBox regressor heads
-            mrcnn_class_logits, mrcnn_class, mrcnn_bbox =\
+            mrcnn_class_logits, mrcnn_class, mrcnn_bbox, shared =\
                 fpn_classifier_graph(rpn_rois, mrcnn_feature_maps, config.IMAGE_SHAPE,
                                      config.POOL_SIZE, config.NUM_CLASSES)
 
@@ -1937,8 +2029,7 @@ class MaskRCNN():
 
             model = KM.Model([input_image, input_image_meta],
                              [detections, mrcnn_class, mrcnn_bbox,
-                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox],
-                             name='mask_rcnn')
+                                 mrcnn_mask, rpn_rois, rpn_class, rpn_bbox, rpn_class_logits, P2, P3, P4, P5, P6, mrcnn_class_logits, mrcnn_class, mrcnn_bbox, detection_boxes], name='mask_rcnn')
 
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
@@ -2334,9 +2425,24 @@ class MaskRCNN():
         if verbose:
             log("molded_images", molded_images)
             log("image_metas", image_metas)
+        print("molded_images: ", molded_images)
+        folder = "/home/jxy/data/maskrcnn/weights/"
+        out = folder + "input" + '-' + '_'.join(str(x) for x in molded_images.shape) + '.txt'
+        file = open(out, "w")
+        fa = molded_images.flatten()
+        for i in fa:
+            file.write(str(i) + "\n")
+        file.close()
+
+        # out = folder + "image_metas" + '-' + '_'.join(str(x) for x in image_metas.shape) + '.txt'
+        # file = open(out, "w")
+        # fa = image_metas.flatten()
+        # for i in fa:
+        #     file.write(str(i) + "\n")
+        # file.close()
         # Run object detection
         detections, mrcnn_class, mrcnn_bbox, mrcnn_mask, \
-            rois, rpn_class, rpn_bbox =\
+            rois, rpn_class, rpn_bbox, rpn_class_logits, P2, P3, P4, P5, P6, mrcnn_class_logits, mrcnn_class, mrcnn_bbox, shared =\
             self.keras_model.predict([molded_images, image_metas], verbose=0)
         # Process detections
         results = []
@@ -2349,6 +2455,13 @@ class MaskRCNN():
                 "class_ids": final_class_ids,
                 "scores": final_scores,
                 "masks": final_masks,
+                "rpn_class": rpn_class,
+                "rpn_class_logits": rpn_class_logits,
+                "rpn_bbox": rpn_bbox,
+                "rpn_rois": rois,
+                "features": [P2, P3, P4, P5, P6],
+                "mbox_classify": [mrcnn_class_logits, mrcnn_class, mrcnn_bbox, shared],
+                "mrcnn_mask": mrcnn_mask
             })
         return results
 
